@@ -1,0 +1,25 @@
+# 敏感資訊
+.env
+
+# 快取與暫存
+__pycache__/
+*.py[cod]
+*.log
+translate_log.txt
+
+# 翻譯存檔（個人資料）
+translation_output/
+
+# 備份檔
+*_backup_*.py
+
+# 模型快取（faster-whisper 自動下載）
+~/.cache/huggingface/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/

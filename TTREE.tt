@@ -1,0 +1,186 @@
+@@ AutoSpeak - 即時語音翻譯系統
+	版本: v1.3 雙視窗 + 翻譯存檔版
+	建立日期: 2026-07-03
+	最後更新: 2026-07-05
+	狀態: 可用，喇叭直通 + 逐格/整句雙模式正常
+
+	L A. 專案概要
+		目的: 即時將英文語音（系統音訊、麥克風、YouTube）翻譯成繁體中文字幕 + 語音
+		使用者場景:
+			L Teams / Zoom / Webex 英文會議 → 即時中文字幕
+			L YouTube / TED 英文影片 → 即時中文字幕
+			L 輸入直接指定裝置（麥克風、立體聲混音）
+		核心工具: 全部免費
+			L STT: faster-whisper tiny（CPU, int8）
+			L 翻譯L1: deep-translator GoogleTranslator（免費）
+			L 翻譯L2: Google Gemini API（免費版 15 req/min）
+			L TTS: Windows SAPI5 / PowerShell（內建）
+		總費用: $0
+
+	L B. 技術架構
+
+		L 音訊擷取
+			L 立體聲混音（Stereo Mix）: WASAPI hostapi=3 裝置，擷取所有系統音訊
+			L WASAPI Loopback: sd.WasapiSettings(loopback=True)，針對輸出裝置
+			L 裝置原生 samplerate/channels → callback 內 np.interp 重採樣到 16000Hz
+
+		L VAD（語音活動偵測）
+			L 能量 RMS 閾值偵測，frame=160 samples
+			L 自適應校準：前 2 秒採樣，10th percentile × 4.0，上限 0.04，下限 0.003
+			L 靜音 0.6 秒 → 片段結束送辨識
+			L 連續語音超 15 秒 → 強制截斷送辨識（防卡住）
+
+		L STT（語音辨識）
+			L faster-whisper tiny，CPU int8，多語言支援
+			L 辨識結果傳給 process_chunk()
+
+		L 翻譯層
+			L 逐格模式（chunk）: 每段 → GoogleTranslator → 立即輸出
+			L 整句模式（sentence）: 累積 → 語義 flush 判斷 → Gemini AI 翻譯
+			L 語義 flush 條件: 句末標點 / 字數>=20 Gemini 判斷 / 12秒 timeout / 2000字上限
+			L Gemini rate limit 保護: 最小間隔 8 秒，失敗懲罰 +10 秒，直接 fallback 不重試
+
+		L 說話人辨識（diarize 模式）
+			L Gemini prompt 推斷說話人（問句/回答模式）
+			L 輸出帶 【A】/【B】/【C】 標籤
+			L 保留最近 4 輪語者記憶（_speaker_context）維持一致性
+			L Gemini 失敗時：_diarize_fallback() 用英文問句特徵做基本推斷
+
+		L TTS（語音輸出）
+			L PowerShell SAPI5，< 0.1s 延遲
+			L 講者 A: Microsoft Hanhan（中文台灣，rate=3）
+			L 講者 B: 第二個可用聲音（rate=0），背景執行緒自動偵測
+
+		L 翻譯存檔
+			L 每次按「開始翻譯」自動建立 translation_output/trans_YYYYMMDD_HHMMSS.txt
+			L 檔案標頭含 GUI 設定（模式/場景/TTS/說話人）
+			L 格式: [HH:MM:SS] EN: ... ZH: ...
+
+	L C. 專案結構
+		L 根目錄: /mnt/d/Morris/under_cook/0703_auto_speaking_traslation/
+		== 主要檔案 ====
+		L PY_auto_translate.py - 主程式（1300行，含 GUI + VAD + STT + 翻譯 + TTS）
+		L .env - GEMINI_API_KEY（不上傳 GitHub）
+		L translate_log.txt - 執行日誌（雙寫 console + 檔案）
+		L translation_output/ - 翻譯存檔資料夾
+		== 工具腳本 ====
+		L install_pkgs.bat - 一鍵安裝所有 Python 套件
+		L run_translate.bat - Windows 快捷啟動
+		L test_gemini.py - 測試 Gemini API 連線
+		L diagnose_audio.py - 診斷音訊音量分佈
+		L check_voices.py - 列出可用 TTS 聲音
+		== 備份 ====
+		L PY_auto_translate_backup_20250705.py - 加入 diarize 前的穩定版
+
+	L D. GUI 架構
+		== 音訊來源（三選一）====
+		L 喇叭直通（預設）: 自動選立體聲混音，擷取所有系統音訊
+		L URL 模式: 輸入 YouTube/TED URL，yt-dlp 下載 → ffmpeg 轉換 → Whisper 辨識
+		L 指定裝置: 下拉選擇音訊輸入裝置（麥克風/混音）
+
+		== 翻譯模式（二選一）====
+		L 逐格翻譯（即時）: 每段 Whisper 結果 → Google Translate → 更新字幕視窗
+		L 整句翻譯（AI）: 累積後 Gemini → 彈出第二視窗（高品質）
+
+		== 翻譯場景（整句模式用）====
+		L 通用 / YouTube TED 演講 / Teams 商業會議
+
+		== 選項 ====
+		L 中文語音輸出（SAPI5 TTS）
+		L 說話人區分（【A】/【B】 標籤，Gemini 推斷）
+
+		== 視窗 ====
+		L 主視窗: 控制面板 + 逐格翻譯歷史
+		L 字幕視窗: 底部懸浮透明字幕（EN + ZH），即時更新
+		L 整句翻譯視窗（整句模式時自動彈出）: Gemini AI 翻譯歷史
+
+	L E. 核心全域變數
+		L subtitle_queue: 字幕視窗即時更新
+		L sentence_output_queue: 主視窗逐格翻譯歷史
+		L sentence_queue: 整句視窗 Gemini 翻譯輸出
+		L tts_queue: TTS 播放佇列
+		L stop_event: 執行緒停止信號
+		L _speaker_context: [(label, zh)] 最近 8 筆語者記憶
+		L _gemini_last_call / _GEMINI_MIN_INTERVAL: rate limit 控制
+
+	L F. 已解決問題記錄
+		L1 PaErrorCode -9996 Invalid device
+			L 根因: WASAPI 裝置需原生 samplerate/channels
+			L 解法: query_devices() 取原生參數，callback 內 np.interp 重採樣
+		L2 VAD 閾值過高（0.229）封鎖所有語音
+			L 根因: 校準期間系統音訊拉高閾值
+			L 解法: 10th percentile × 4.0，上限 0.04，下限 0.003
+		L3 TTS 停止後繼續播放
+			L 解法: _stop() 終止 _tts_proc + 清空 tts_queue
+		L4 Gemini ClientError 頻繁重試造成 rate limit 惡化
+			L 解法: 失敗直接 fallback，懲罰 +10 秒，不重試
+		L5 連續語音不換句（影片連續播放卡住）
+			L 解法: MAX_SPEECH = 15 秒強制截斷，in_speech 保持 True 繼續累積
+		L6 逐格翻譯慢（誤走 Gemini）
+			L 解法: chunk 模式固定走 Google Translate，不受 rate limit 影響
+		L7 整句模式無即時回饋感
+			L 解法: 雙軌架構 — chunk 翻譯永遠更新字幕（即時），整句 Gemini 輸出到第二視窗
+
+	L G. 安裝與執行
+		== Python 套件 ====
+		L pip install faster-whisper sounddevice soundfile numpy deep-translator python-dotenv google-genai
+
+		== 安裝前置條件 ====
+		L Windows: 立體聲混音裝置（音效卡設定 → 啟用）
+		L ffmpeg 加入 PATH（URL 模式需要）
+		L yt-dlp 安裝（URL 模式需要）
+
+		== 執行方式 ====
+		L python PY_auto_translate.py
+		L 或雙擊 run_translate.bat
+
+		== .env 設定 ====
+		L GEMINI_API_KEY=your_key_here
+
+	L H. 版本歷史
+		== v1.0 (2026-07-03) ====
+		L 基礎架構：VAD + Whisper + Google Translate + SAPI5 TTS
+		L GUI：音訊來源選擇、字幕視窗
+		== v1.1 ====
+		L 立體聲混音自動偵測（WASAPI loopback）
+		L 自適應 VAD 閾值校準
+		L URL 模式（yt-dlp + ffmpeg）
+		== v1.2 ====
+		L Gemini AI 整句翻譯（語義 flush）
+		L 說話人辨識（【A】/【B】 標籤）
+		L Gemini rate limit 保護
+		L 翻譯輸出存檔（含 GUI 設定標頭）
+		== v1.3（目前）====
+		L 連續語音 15 秒強制截斷（防卡住）
+		L 逐格翻譯固定走 Google（速度快）
+		L 雙視窗：字幕視窗（即時）+ 整句視窗（AI 品質）
+		L Gemini 失敗懲罰機制（+10s，不重試）
+		L _diarize_fallback()：Gemini 失敗時問句特徵推斷說話人
+
+	L I. 目前狀態
+		L 喇叭直通模式正常（立體聲混音自動偵測）
+		L 逐格翻譯正常（快速，Google Translate）
+		L 整句翻譯正常（Gemini AI，雙視窗）
+		L 說話人辨識：Gemini 成功時有 【A】/【B】，失敗時用問句特徵推斷
+		L 翻譯存檔正常（translation_output/*.txt）
+		L 待處理:
+			L Gemini 免費版 rate limit 限制（15 req/min），高頻場景仍會 fallback
+			L 說話人超過 2 人時準確性待驗證
+			L URL 模式：直播串流支援
+
+== 補充 =============================================
+
+	L 開發環境
+		L Windows 11 + WSL2（Ubuntu）
+		L Python 3.11+
+		L 音效卡: Realtek HD Audio（立體聲混音 device=10, hostapi=3）
+
+	L 關鍵函數索引
+		L _diarize_fallback(en, zh) - Gemini 失敗時問句特徵推斷說話人
+		L translate_text_ai(text, scene, diarize) - Gemini 翻譯（rate limit 保護）
+		L process_chunk(en, mode, use_tts, scene, diarize) - 雙軌翻譯分發
+		L live_worker(device, loopback, ...) - 音訊擷取主循環
+		L vad_loop() - VAD 偵測（含 15 秒強制截斷）
+		L _start_output_file(settings) - 建立存檔（含 GUI 設定標頭）
+		L SentenceWindow - 整句 AI 翻譯第二視窗
+		L SubtitleWindow - 底部懸浮字幕視窗
